@@ -1,0 +1,35 @@
+# STM32CubeIDE specific files
+.metadata/
+.settings/
+.project
+.cproject
+.mxproject
+*.launch
+*.log
+
+# Build artifacts
+build/
+Debug/
+Release/
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.d
+*.su
+*.srec
+*.lst
+
+# CubeMX generated files (optional, depending on workflow)
+# If you prefer to regenerate these files, you can ignore them.
+# Otherwise, keep them tracked for consistency.
+# *.ioc # Uncomment if you want to ignore the .ioc file
+
+# Other common files to ignore
+*~
+*.bak
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db
