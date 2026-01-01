@@ -354,13 +354,13 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pins : BUTTON_FLARE_Pin BUTTON_WEAPON_Pin BUTTON_TRIGGER_Pin BUTTON_PADDLE_Pin */
   GPIO_InitStruct.Pin = BUTTON_FLARE_Pin|BUTTON_WEAPON_Pin|BUTTON_TRIGGER_Pin|BUTTON_PADDLE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : BUTTON_MISSILE_Pin */
   GPIO_InitStruct.Pin = BUTTON_MISSILE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(BUTTON_MISSILE_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
