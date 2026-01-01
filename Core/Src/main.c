@@ -44,6 +44,7 @@
 
 COM_InitTypeDef BspCOMInit;
 ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
 /* USER CODE BEGIN PV */
 extern USBD_HandleTypeDef hUsbDeviceFS;
@@ -52,6 +53,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -65,71 +67,57 @@ typedef struct __attribute__((packed)) {
     uint16_t  buttons;  // lower 10 bits = buttons
 } HID_JoystickReport_t;
 
-uint8_t read_buttons(void) //active low
+uint8_t read_buttons(void) // active-low (press → GND)
 {
     uint8_t b = 0;
 
-    b |= (!HAL_GPIO_ReadPin(BUTTON_WEAPON_GPIO_Port, BUTTON_WEAPON_Pin) == GPIO_PIN_SET) << 0;
-    b |= (!HAL_GPIO_ReadPin(BUTTON_TRIGGER_GPIO_Port, BUTTON_TRIGGER_Pin) == GPIO_PIN_SET) << 1;
-    b |= (!HAL_GPIO_ReadPin(BUTTON_FLARE_GPIO_Port, BUTTON_FLARE_Pin) == GPIO_PIN_SET) << 2;
-    b |= (!HAL_GPIO_ReadPin(BUTTON_MISSILE_GPIO_Port, BUTTON_MISSILE_Pin) == GPIO_PIN_SET) << 3;
-    b |= (!HAL_GPIO_ReadPin(BUTTON_PADDLE_GPIO_Port, BUTTON_PADDLE_Pin) == GPIO_PIN_SET) << 4;
+    // 1 = pressed, 0 = released
+    b |= (HAL_GPIO_ReadPin(BUTTON_WEAPON_GPIO_Port, BUTTON_WEAPON_Pin) == GPIO_PIN_RESET) << 0;
+    b |= (HAL_GPIO_ReadPin(BUTTON_TRIGGER_GPIO_Port, BUTTON_TRIGGER_Pin) == GPIO_PIN_RESET) << 1;
+    b |= (HAL_GPIO_ReadPin(BUTTON_FLARE_GPIO_Port, BUTTON_FLARE_Pin) == GPIO_PIN_RESET) << 2;
+    b |= (HAL_GPIO_ReadPin(BUTTON_MISSILE_GPIO_Port, BUTTON_MISSILE_Pin) == GPIO_PIN_RESET) << 3;
+    b |= (HAL_GPIO_ReadPin(BUTTON_PADDLE_GPIO_Port, BUTTON_PADDLE_Pin) == GPIO_PIN_RESET) << 4;
 
     return b;
 }
 
-// Read both throttle and steer ADC channels (polling method)
-uint16_t readADC(uint32_t channel)
+static uint16_t fx = 512, fy = 512;
+
+// Simple axis filtering. Low pass filter method
+uint16_t filter_axis(uint16_t prev, uint16_t input)
 {
-    ADC_ChannelConfTypeDef sConfig = {0};
-
-    // Stop ADC if busy
-    if (HAL_ADC_GetState(&hadc1) & HAL_ADC_STATE_REG_BUSY)
-        HAL_ADC_Stop(&hadc1);
-
-    // Disable ADC if enabled
-    if (ADC1->CR & ADC_CR_ADEN)
-    {
-        ADC1->CR |= ADC_CR_ADDIS;
-        while (ADC1->CR & ADC_CR_ADEN);   // Wait until disabled
-    }
-
-    // Configure channel
-    sConfig.Channel = channel;
-    sConfig.Rank = ADC_REGULAR_RANK_1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_47CYCLES_5;    // stable for pots
-    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-
-    // Enable ADC
-    ADC1->CR |= ADC_CR_ADEN;
-    while (!(ADC1->ISR & ADC_ISR_ADRDY));  // Wait for ready
-
-    // Convert
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-
-    uint16_t val = HAL_ADC_GetValue(&hadc1);
-    HAL_ADC_Stop(&hadc1);
-
-    return val;
+    return prev + ((int32_t)input - prev) / 8;
 }
 
-void joystick_task(void)
+//DMA buffer for the two ADC channels roll and pitch
+volatile uint16_t adc_buf[2];
+
+void joystick_task(void) //build and send the HID report
 {
     HID_JoystickReport_t report;
 
-    while (1)
-    {
-        report.x = readADC(ADC_CHANNEL_1); // PA0
-        report.y = readADC(ADC_CHANNEL_2); // PA1
-        report.buttons = read_buttons();
+    static uint32_t last_tick = 0;
 
-        USBD_HID_SendReport(&hUsbDeviceFS,
+	if (HAL_GetTick() - last_tick < 10) //limits to 100Hz (10ms interval)
+		return;
+
+	last_tick = HAL_GetTick();
+
+	//12 bit ADC precision for STM32G431
+	uint16_t x = adc_buf[0] >> 2; //pitch
+	uint16_t y = adc_buf[1] >> 2; //yaw
+
+	// TO DO - Filtering
+	//fx = filter_axis(fx, x);
+	//fy = filter_axis(fy, y);
+
+	report.x = 1023 - x;
+	report.y = y;
+	report.buttons = read_buttons() & 0x03FF;
+
+    USBD_HID_SendReport(&hUsbDeviceFS,
                             (uint8_t*)&report,
                             sizeof(report));
-
-        HAL_Delay(20); // 50 Hz update rate
-    }
 }
 /* USER CODE END 0 */
 
@@ -162,10 +150,25 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USB_Device_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  // Pitch → IN1 → rank 1
+  sConfig.Channel = ADC_CHANNEL_1;  // PA0
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+  // Roll → IN6 → rank 2
+  sConfig.Channel = ADC_CHANNEL_6;  // PC0
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+  // Start ADC with DMA
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 2);
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -189,6 +192,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
 	  joystick_task();
 
     /* USER CODE END WHILE */
@@ -267,18 +271,18 @@ static void MX_ADC1_Init(void)
   */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_10B;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.GainCompensation = 0;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.NbrOfConversion = 2;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   hadc1.Init.OversamplingMode = DISABLE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -309,6 +313,23 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMAMUX1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(USB_LP_IRQn, 1, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 2, 0);
 
 }
 
