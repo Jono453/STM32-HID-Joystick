@@ -33,6 +33,18 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+// Thresholds for HAT and Throttle virtual button activation
+// HAT Max/Min = Button 1 or Button 2
+// Throttle Max/Min = Button 3 or Button 4
+#define ADC_MIN_PRESS   30
+#define ADC_MIN_RELEASE 300
+#define ADC_MAX_PRESS   800
+#define ADC_MAX_RELEASE 1000
+#define AXIS_MAX 1023
+
+//DMA buffer for the four ADC channels (pitch, roll, throttle, hat)
+volatile uint16_t adc_buf[4];
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -67,11 +79,11 @@ typedef struct __attribute__((packed)) {
     uint16_t  buttons;  // lower 10 bits = buttons
 } HID_JoystickReport_t;
 
-uint8_t read_buttons(void) // active-low (press → GND)
+uint16_t read_hardware_buttons(void)
 {
-    uint8_t b = 0;
+    uint16_t b = 0;
 
-    // 1 = pressed, 0 = released
+    // Hardware Buttons (bits 0-4)
     b |= (HAL_GPIO_ReadPin(BUTTON_WEAPON_GPIO_Port, BUTTON_WEAPON_Pin) == GPIO_PIN_RESET) << 0;
     b |= (HAL_GPIO_ReadPin(BUTTON_TRIGGER_GPIO_Port, BUTTON_TRIGGER_Pin) == GPIO_PIN_RESET) << 1;
     b |= (HAL_GPIO_ReadPin(BUTTON_FLARE_GPIO_Port, BUTTON_FLARE_Pin) == GPIO_PIN_RESET) << 2;
@@ -79,6 +91,14 @@ uint8_t read_buttons(void) // active-low (press → GND)
     b |= (HAL_GPIO_ReadPin(BUTTON_PADDLE_GPIO_Port, BUTTON_PADDLE_Pin) == GPIO_PIN_RESET) << 4;
 
     return b;
+}
+
+volatile uint8_t adc_ready = 0;
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if(hadc->Instance == ADC1)
+        adc_ready = 1;
 }
 
 static uint16_t fx = 512, fy = 512;
@@ -89,14 +109,18 @@ uint16_t filter_axis(uint16_t prev, uint16_t input)
     return prev + ((int32_t)input - prev) / 8;
 }
 
-//DMA buffer for the two ADC channels roll and pitch
-volatile uint16_t adc_buf[2];
+#define ADC_HID_PITCH	adc_buf[0]
+#define ADC_HID_ROLL    adc_buf[1]
+#define ADC_THROTTLE 	adc_buf[2]
+#define ADC_HAT      	adc_buf[3]
 
 void joystick_task(void) //build and send the HID report
 {
-    HID_JoystickReport_t report;
+//	if(!adc_ready) return;  // wait for full sequence
+//	adc_ready = 0;          // consume sample
 
     static uint32_t last_tick = 0;
+	static uint8_t thr_min = 0, thr_max = 0, hat_min = 0, hat_max = 0;
 
 	if (HAL_GetTick() - last_tick < 10) //limits to 100Hz (10ms interval)
 		return;
@@ -104,16 +128,37 @@ void joystick_task(void) //build and send the HID report
 	last_tick = HAL_GetTick();
 
 	//12 bit ADC precision for STM32G431
-	uint16_t x = adc_buf[0] >> 2; //pitch
-	uint16_t y = adc_buf[1] >> 2; //yaw
+	uint16_t x 					= ADC_HID_PITCH >> 2; //pitch
+	uint16_t y 					= ADC_HID_ROLL >> 2; //roll
 
-	// TO DO - Filtering
+	// TO DO - Filtering / deadzone logic
 	//fx = filter_axis(fx, x);
 	//fy = filter_axis(fy, y);
 
-	report.x = 1023 - x;
+	uint16_t throttle_select 	= ADC_THROTTLE >> 2;
+	uint16_t hat_select      	= ADC_HAT >> 2;
+
+	// Hysteresis logic
+	thr_min = (!thr_min && throttle_select < ADC_MIN_PRESS) ? 1 :
+			  (thr_min && throttle_select > ADC_MIN_RELEASE ? 0 : thr_min);
+
+	thr_max = (!thr_max && throttle_select > ADC_MAX_PRESS) ? 1 :
+			  (thr_max && throttle_select < ADC_MAX_RELEASE ? 0 : thr_max);
+
+	hat_min = (!hat_min && hat_select < ADC_MIN_PRESS) ? 1 :
+			  (hat_min && hat_select > ADC_MIN_RELEASE ? 0 : hat_min);
+
+	hat_max = (!hat_max && hat_select > ADC_MAX_PRESS) ? 1 :
+			  (hat_max && hat_select < ADC_MAX_RELEASE ? 0 : hat_max);
+
+	uint16_t buttons = read_hardware_buttons();
+	buttons |= (thr_min << 5) | (thr_max << 6) | (hat_min << 7) | (hat_max << 8);
+
+	HID_JoystickReport_t report;
+
+	report.x = AXIS_MAX - x;
 	report.y = y;
-	report.buttons = read_buttons() & 0x03FF;
+	report.buttons = buttons & 0x03FF;
 
     USBD_HID_SendReport(&hUsbDeviceFS,
                             (uint8_t*)&report,
@@ -167,8 +212,18 @@ int main(void)
   sConfig.Rank = ADC_REGULAR_RANK_2;
   HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 
+  // HAT Select → IN7 → rank 3
+  sConfig.Channel = ADC_CHANNEL_7;  // PC1
+  sConfig.Rank = ADC_REGULAR_RANK_3;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+  // Throttle Select → IN2 → rank 4
+  sConfig.Channel = ADC_CHANNEL_2;  // PA1
+  sConfig.Rank = ADC_REGULAR_RANK_4;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
   // Start ADC with DMA
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 2);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 4);
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -278,7 +333,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
-  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.NbrOfConversion = 4;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
@@ -302,7 +357,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
