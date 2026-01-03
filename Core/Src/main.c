@@ -38,8 +38,8 @@
 // Throttle Max/Min = Button 3 or Button 4
 #define ADC_MIN_PRESS   30
 #define ADC_MIN_RELEASE 200
-#define ADC_MAX_PRESS   800
-#define ADC_MAX_RELEASE 1000
+#define ADC_MAX_PRESS    850
+#define ADC_MAX_RELEASE  800
 #define AXIS_MAX 1023
 
 //DMA buffer for the ADC channels (pitch, roll, throttle, hat)
