@@ -128,6 +128,15 @@ static inline uint16_t SMA_update(SMA_t *f, uint16_t input)
     return (uint16_t)(f->sum / SMA_SIZE);
 }
 
+static inline uint16_t SMA_update(SMA_t *f, uint16_t input)
+{
+    f->sum -= f->buf[f->idx];
+    f->buf[f->idx] = input;
+    f->sum += input;
+    f->idx = (f->idx + 1) % SMA_SIZE;
+    return (uint16_t)(f->sum / SMA_SIZE);
+}
+
 // Using DMA on Both ADC1 and ADC2
 #define ADC_HID_PITCH    adc_buf[0]
 #define ADC_HID_ROLL     adc_buf[1]
@@ -170,6 +179,11 @@ void joystick_task(void) //build and send the HID report
 	uint16_t sx  = SMA_update(&sma_pitch, x);
 	uint16_t sy  = SMA_update(&sma_roll, y);
 	uint16_t srz = SMA_update(&sma_yaw, rz);
+
+	 // Apply SMA
+	uint16_t sx  = SMA_update(&sma_pitch, x);
+	uint16_t sy  = SMA_update(&sma_roll,  y);
+	uint16_t srz = SMA_update(&sma_yaw,   rz);
 
 	uint16_t buttons = read_hardware_buttons();
 
