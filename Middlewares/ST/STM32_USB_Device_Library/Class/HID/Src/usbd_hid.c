@@ -316,17 +316,19 @@ __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE] __
     0x09, 0x04,        // USAGE (Joystick)
     0xA1, 0x01,        // COLLECTION (Application)
 
-    // ----- Axes: X, Y -----
+    // ----- Axes: X, Y, Slider, Rz (Yaw) -----
     0x05, 0x01,        //   USAGE_PAGE (Generic Desktop)
-    0x09, 0x30,        //   USAGE (X)
-    0x09, 0x31,        //   USAGE (Y)
+    0x09, 0x30,        //   USAGE (X)       — Pitch
+    0x09, 0x31,        //   USAGE (Y)       — Roll
+    0x09, 0x36,        //   USAGE (Slider)  — Throttle
+    0x09, 0x35,        //   USAGE (Rz)      — Yaw ← ADD (2 bytes)
     0x15, 0x00,        //   LOGICAL_MINIMUM (0)
     0x26, 0xFF, 0x03,  //   LOGICAL_MAXIMUM (1023)
     0x75, 0x10,        //   REPORT_SIZE (16 bits)
-    0x95, 0x02,        //   REPORT_COUNT (2 axes)
-    0x81, 0x02,        //   INPUT (Data,Var,Abs)
+    0x95, 0x04,        //   REPORT_COUNT (4) ← was 0x03
+    0x81, 0x02,        //   INPUT (Data, Var, Abs)
 
-    // ----- Buttons (10) -----
+    // ----- Buttons (10) — UNCHANGED -----
     0x05, 0x09,        //   USAGE_PAGE (Button)
     0x19, 0x01,        //   USAGE_MINIMUM (Button 1)
     0x29, 0x0A,        //   USAGE_MAXIMUM (Button 10)
@@ -334,12 +336,12 @@ __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE] __
     0x25, 0x01,        //   LOGICAL_MAXIMUM (1)
     0x75, 0x01,        //   REPORT_SIZE (1 bit)
     0x95, 0x0A,        //   REPORT_COUNT (10)
-    0x81, 0x02,        //   INPUT (Data,Var,Abs)
+    0x81, 0x02,        //   INPUT (Data, Var, Abs)
 
-    // ----- Padding (6 bits) -----
+    // ----- Padding (6 bits) — UNCHANGED -----
     0x75, 0x06,        //   REPORT_SIZE (6)
     0x95, 0x01,        //   REPORT_COUNT (1)
-    0x81, 0x03,        //   INPUT (Cnst,Var,Abs)
+    0x81, 0x03,        //   INPUT (Cnst, Var, Abs)
 
     0xC0               // END_COLLECTION
 };

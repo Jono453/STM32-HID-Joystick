@@ -33,17 +33,10 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-// Thresholds for HAT and Throttle virtual button activation
-// HAT Max/Min = Button 1 or Button 2
-// Throttle Max/Min = Button 3 or Button 4
-#define ADC_MIN_PRESS   30
-#define ADC_MIN_RELEASE 200
-#define ADC_MAX_PRESS    850
-#define ADC_MAX_RELEASE  800
 #define AXIS_MAX 1023
 
 //DMA buffer for the ADC channels (pitch, roll, throttle, hat)
-volatile uint16_t adc_buf[2]; // 0 = Pitch, 1 = Roll
+volatile uint16_t adc_buf[4]; // 0=Pitch, 1=Roll, 2=Throttle, 3=Yaw
 
 /* USER CODE END PD */
 
@@ -56,7 +49,6 @@ volatile uint16_t adc_buf[2]; // 0 = Pitch, 1 = Roll
 
 COM_InitTypeDef BspCOMInit;
 ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
 
 /* USER CODE BEGIN PV */
@@ -68,18 +60,19 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-typedef struct __attribute__((packed)) {
-    uint16_t x;        // axis 0–1023
-    uint16_t y;        // axis 0–1023
-    uint16_t  buttons;  // lower 10 bits = buttons
-} HID_JoystickReport_t;
+typedef struct {
+    uint16_t pitch;    // X      — 0–1023  (2 bytes)
+    uint16_t roll;     // Y      — 0–1023  (2 bytes)
+    uint16_t throttle; // Slider — 0–1023  (2 bytes)
+    uint16_t yaw;      // Rz     — 0–1023  (2 bytes)
+    uint16_t buttons;  // 10 buttons + 6 bit padding  (2 bytes)
+} __attribute__((packed)) HID_JoystickReport_t;  // total: 10 bytes
 
 uint16_t read_hardware_buttons(void)
 {
@@ -103,44 +96,43 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         adc_ready = 1;
 }
 
-uint16_t adc2_hat = 0;
-uint16_t adc2_throttle = 0;
-
-static uint16_t adc2_read(uint32_t channel)
-{
-    ADC_ChannelConfTypeDef sConfig = {0};
-
-    sConfig.Channel = channel;
-    sConfig.Rank = ADC_REGULAR_RANK_1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
-
-    HAL_ADC_ConfigChannel(&hadc2, &sConfig);
-
-    HAL_ADC_Start(&hadc2);
-    HAL_ADC_PollForConversion(&hadc2, 10);
-    uint16_t val = HAL_ADC_GetValue(&hadc2);
-    HAL_ADC_Stop(&hadc2);
-
-    return val;
-}
-
-void read_virtual_axes(void)
-{
-    adc2_hat      = adc2_read(ADC_CHANNEL_8); // PC2
-    adc2_throttle = adc2_read(ADC_CHANNEL_9); // PC3
-}
-
 static uint16_t fx = 512, fy = 512;
 
-// Simple axis filtering. Low pass filter method
-uint16_t filter_axis(uint16_t prev, uint16_t input)
+// Simple Moving Average — window size N
+// Larger N = smoother but more lag
+// At 100Hz: N=16 = 160ms lag, N=8 = 80ms, N=32 = 320ms
+
+#define SMA_SIZE 16  // tune this one value for all axes
+
+typedef struct {
+    uint16_t buf[SMA_SIZE];
+    uint8_t  idx;
+    uint32_t sum;
+    uint8_t  full;  // 0 until buffer is filled on startup
+} SMA_t;
+
+static inline void SMA_init(SMA_t *f, uint16_t initial)
 {
-    return prev + ((int32_t)input - prev) / 8;
+    for (int i = 0; i < SMA_SIZE; i++) f->buf[i] = initial;
+    f->sum  = (uint32_t)initial * SMA_SIZE;
+    f->idx  = 0;
+    f->full = 1;
+}
+
+static inline uint16_t SMA_update(SMA_t *f, uint16_t input)
+{
+    f->sum -= f->buf[f->idx];
+    f->buf[f->idx] = input;
+    f->sum += input;
+    f->idx = (f->idx + 1) % SMA_SIZE;
+    return (uint16_t)(f->sum / SMA_SIZE);
 }
 
 // Using DMA on Both ADC1 and ADC2
-#define ADC_HID_PITCH	adc_buf[0]
-#define ADC_HID_ROLL    adc_buf[1]
+#define ADC_HID_PITCH    adc_buf[0]
+#define ADC_HID_ROLL     adc_buf[1]
+#define ADC_HID_THROTTLE adc_buf[2]
+#define ADC_HID_YAW      adc_buf[3]
 
 void joystick_task(void) //build and send the HID report
 {
@@ -148,7 +140,12 @@ void joystick_task(void) //build and send the HID report
 //	adc_ready = 0;          // consume sample
 
     static uint32_t last_tick = 0;
-	static uint8_t thr_min = 0, thr_max = 0, hat_min = 0, hat_max = 0;
+
+	// SMA filters
+	static SMA_t sma_pitch = {0};
+	static SMA_t sma_roll  = {0};
+	static SMA_t sma_yaw   = {0};
+	static uint8_t sma_ready = 0;
 
 	if (HAL_GetTick() - last_tick < 10) //limits to 100Hz (10ms interval)
 		return;
@@ -156,39 +153,32 @@ void joystick_task(void) //build and send the HID report
 	last_tick = HAL_GetTick();
 
 	//12 bit ADC precision for STM32G431
-	// DMA using ADC1
-	uint16_t x 					= ADC_HID_PITCH >> 2; //pitch
-	uint16_t y 					= ADC_HID_ROLL >> 2; //roll
+	uint16_t x = ADC_HID_PITCH >> 2; 		//pitch
+	uint16_t y = ADC_HID_ROLL >> 2; 		//roll
+	uint16_t z = ADC_HID_THROTTLE >> 2;   	// throttle
+	uint16_t rz  = ADC_HID_YAW >> 2;  		// yaw (ADC2_IN2)
 
-	// TO DO - Filtering / deadzone logic
-	//fx = filter_axis(fx, x);
-	//fy = filter_axis(fy, y);
+	// Init on first run with live values — avoids startup jump to zero
+	if (!sma_ready) {
+		SMA_init(&sma_pitch, x);
+		SMA_init(&sma_roll,  y);
+		SMA_init(&sma_yaw,   rz);
+		sma_ready = 1;
+	}
 
-	// Read virtual buttons from ADC2 polling
-	read_virtual_axes();
-	uint16_t hat_select      = adc2_hat >> 2;
-	uint16_t throttle_select = adc2_throttle >> 2;
-
-	// Hysteresis logic
-	thr_min = (!thr_min && throttle_select < ADC_MIN_PRESS) ? 1 :
-			  (thr_min && throttle_select > ADC_MIN_RELEASE ? 0 : thr_min);
-
-	thr_max = (!thr_max && throttle_select > ADC_MAX_PRESS) ? 1 :
-			  (thr_max && throttle_select < ADC_MAX_RELEASE ? 0 : thr_max);
-
-	hat_min = (!hat_min && hat_select < ADC_MIN_PRESS) ? 1 :
-			  (hat_min && hat_select > ADC_MIN_RELEASE ? 0 : hat_min);
-
-	hat_max = (!hat_max && hat_select > ADC_MAX_PRESS) ? 1 :
-			  (hat_max && hat_select < ADC_MAX_RELEASE ? 0 : hat_max);
+	 // Apply SMA
+	uint16_t sx  = SMA_update(&sma_pitch, x);
+	uint16_t sy  = SMA_update(&sma_roll, y);
+	uint16_t srz = SMA_update(&sma_yaw, rz);
 
 	uint16_t buttons = read_hardware_buttons();
-	buttons |= (thr_min << 5) | (thr_max << 6) | (hat_min << 7) | (hat_max << 8);
 
 	HID_JoystickReport_t report;
 
-	report.x = AXIS_MAX - x;
-	report.y = y;
+	report.roll = AXIS_MAX - sx; 		// roll
+	report.pitch = sy;			 		// pitch
+	report.throttle = z; 				// throttle
+	report.yaw = srz;					// yaw
 	report.buttons = buttons & 0x03FF;
 
     USBD_HID_SendReport(&hUsbDeviceFS,
@@ -214,6 +204,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  __HAL_RCC_ADC12_CLK_ENABLE();
 
   /* USER CODE END Init */
 
@@ -229,26 +220,42 @@ int main(void)
   MX_DMA_Init();
   MX_USB_Device_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
 
-  // DMA Setup - ADC 1 - Roll and Pitch
+  // DMA Setup - ADC1 - Pitch and Roll
   ADC_ChannelConfTypeDef sConfig = {0};
 
-  // Pitch → IN1 → rank 1
-  sConfig.Channel = ADC_CHANNEL_1;  // PA0
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  // Pitch → ADC1_IN1 → PA0 → rank 1
+  sConfig.Channel      = ADC_CHANNEL_1;
+  sConfig.Rank         = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  sConfig.SingleDiff   = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset       = 0;
   HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 
-  // Roll → IN6 → rank 2
-  sConfig.Channel = ADC_CHANNEL_6;  // PC0
-  sConfig.Rank = ADC_REGULAR_RANK_2;
-  sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  // Roll → ADC1_IN7 → PC1 → rank 2
+  sConfig.Channel      = ADC_CHANNEL_7;
+  sConfig.Rank         = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
   HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 
-  // Start ADC with DMA
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 2);
+  // Throttle → rank 3
+  sConfig.Channel      = ADC_CHANNEL_9;
+  sConfig.Rank         = ADC_REGULAR_RANK_3;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+  // Yaw → rank 4
+  sConfig.Channel      = ADC_CHANNEL_2;
+  sConfig.Rank         = ADC_REGULAR_RANK_4;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+
+  // Start DMA with 4 channels
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 4);
 
   /* USER CODE END 2 */
 
@@ -359,7 +366,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
-  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.NbrOfConversion = 4;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
@@ -394,65 +401,6 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief ADC2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC2_Init(void)
-{
-
-  /* USER CODE BEGIN ADC2_Init 0 */
-
-  /* USER CODE END ADC2_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC2_Init 1 */
-
-  /* USER CODE END ADC2_Init 1 */
-
-  /** Common config
-  */
-  hadc2.Instance = ADC2;
-  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.GainCompensation = 0;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc2.Init.LowPowerAutoWait = DISABLE;
-  hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.NbrOfConversion = 1;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
-  hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc2.Init.OversamplingMode = DISABLE;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_8;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
-  sConfig.SingleDiff = ADC_SINGLE_ENDED;
-  sConfig.OffsetNumber = ADC_OFFSET_NONE;
-  sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC2_Init 2 */
-
-  /* USER CODE END ADC2_Init 2 */
 
 }
 

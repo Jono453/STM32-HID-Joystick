@@ -68,14 +68,14 @@ void Error_Handler(void);
 #define RCC_OSC_IN_GPIO_Port GPIOF
 #define RCC_OSC_OUT_Pin GPIO_PIN_1
 #define RCC_OSC_OUT_GPIO_Port GPIOF
-#define ROLL_ADC_Pin GPIO_PIN_0
+#define ROLL_ADC_Pin GPIO_PIN_1
 #define ROLL_ADC_GPIO_Port GPIOC
-#define HAT_ADC_Pin GPIO_PIN_2
-#define HAT_ADC_GPIO_Port GPIOC
 #define THROTTLE_ADC_Pin GPIO_PIN_3
 #define THROTTLE_ADC_GPIO_Port GPIOC
 #define PITCH_ADC_Pin GPIO_PIN_0
 #define PITCH_ADC_GPIO_Port GPIOA
+#define HAT_ADC_Pin GPIO_PIN_1
+#define HAT_ADC_GPIO_Port GPIOA
 #define BUTTON_FLARE_Pin GPIO_PIN_10
 #define BUTTON_FLARE_GPIO_Port GPIOB
 #define BUTTON_MISSILE_Pin GPIO_PIN_10
