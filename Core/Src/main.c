@@ -19,7 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
-
+#include "usbd_hid.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -96,8 +96,6 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         adc_ready = 1;
 }
 
-static uint16_t fx = 512, fy = 512;
-
 // Simple Moving Average — window size N
 // Larger N = smoother but more lag
 // At 100Hz: N=16 = 160ms lag, N=8 = 80ms, N=32 = 320ms
@@ -143,8 +141,9 @@ void joystick_task(void) //build and send the HID report
 
 	// SMA filters
 	static SMA_t sma_pitch = {0};
-	static SMA_t sma_roll  = {0};
-	static SMA_t sma_yaw   = {0};
+	static SMA_t sma_roll = {0};
+	static SMA_t sma_throttle = {0};
+	static SMA_t sma_yaw = {0};
 	static uint8_t sma_ready = 0;
 
 	if (HAL_GetTick() - last_tick < 10) //limits to 100Hz (10ms interval)
@@ -161,14 +160,16 @@ void joystick_task(void) //build and send the HID report
 	// Init on first run with live values — avoids startup jump to zero
 	if (!sma_ready) {
 		SMA_init(&sma_pitch, x);
-		SMA_init(&sma_roll,  y);
-		SMA_init(&sma_yaw,   rz);
+		SMA_init(&sma_roll, y);
+		SMA_init(&sma_throttle, z);
+		SMA_init(&sma_yaw, rz);
 		sma_ready = 1;
 	}
 
-	 // Apply SMA
-	uint16_t sx  = SMA_update(&sma_pitch, x);
-	uint16_t sy  = SMA_update(&sma_roll, y);
+	// Apply SMA
+	uint16_t sx = SMA_update(&sma_pitch, x);
+	uint16_t sy = SMA_update(&sma_roll, y);
+	uint16_t sz = SMA_update(&sma_throttle, z);
 	uint16_t srz = SMA_update(&sma_yaw, rz);
 
 	uint16_t buttons = read_hardware_buttons();
@@ -177,7 +178,7 @@ void joystick_task(void) //build and send the HID report
 
 	report.roll = AXIS_MAX - sx; 		// roll
 	report.pitch = sy;			 		// pitch
-	report.throttle = z; 				// throttle
+	report.throttle = sz; 				// throttle
 	report.yaw = srz;					// yaw
 	report.buttons = buttons & 0x03FF;
 
@@ -221,41 +222,6 @@ int main(void)
   MX_USB_Device_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-
-  // DMA Setup - ADC1 - Pitch and Roll
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  // Pitch → ADC1_IN1 → PA0 → rank 1
-  sConfig.Channel      = ADC_CHANNEL_1;
-  sConfig.Rank         = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
-  sConfig.SingleDiff   = ADC_SINGLE_ENDED;
-  sConfig.OffsetNumber = ADC_OFFSET_NONE;
-  sConfig.Offset       = 0;
-  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-
-  // Roll → ADC1_IN7 → PC1 → rank 2
-  sConfig.Channel      = ADC_CHANNEL_7;
-  sConfig.Rank         = ADC_REGULAR_RANK_2;
-  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
-  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-
-  // Throttle → rank 3
-  sConfig.Channel      = ADC_CHANNEL_9;
-  sConfig.Rank         = ADC_REGULAR_RANK_3;
-  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
-  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-
-  // Yaw → rank 4
-  sConfig.Channel      = ADC_CHANNEL_2;
-  sConfig.Rank         = ADC_REGULAR_RANK_4;
-  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
-  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-
-  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
-
-  // Start DMA with 4 channels
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 4);
 
   /* USER CODE END 2 */
 
@@ -386,20 +352,36 @@ static void MX_ADC1_Init(void)
     Error_Handler();
   }
 
-  /** Configure Regular Channel
-  */
+  /* USER CODE BEGIN ADC1_Init 2 */
+  // Pitch → ADC1_IN1 → PA0 → rank 1
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) { Error_Handler(); }
 
+  // Roll → ADC1_IN7 → PC1 → rank 2
+  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) { Error_Handler(); }
+
+  // Throttle → ADC1_IN9 → PC3 → rank 3
+  sConfig.Channel = ADC_CHANNEL_9;
+  sConfig.Rank = ADC_REGULAR_RANK_3;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) { Error_Handler(); }
+
+  // Yaw → ADC1_IN2 → PA1 → rank 4
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = ADC_REGULAR_RANK_4;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) { Error_Handler(); }
+
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 4);
   /* USER CODE END ADC1_Init 2 */
 
 }
